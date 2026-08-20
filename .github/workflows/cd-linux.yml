@@ -73,9 +73,12 @@ jobs:
       # Mirrors Jenkins stage: 'Docker Image Pull'
       - name: Pull and retag image
         run: |
-          APP="${{ inputs.application }}"
+          # APP="${{ inputs.application }}"
+          APP=$(echo "${{ inputs.application }}" | tr '[:upper:]' '[:lower:]')
           ENV_LOWER=$(echo "${{ inputs.environment }}" | tr '[:upper:]' '[:lower:]')
-          SOURCE="${{ env.REGISTRY_URL }}/${{ env.IMAGE_NAMESPACE }}/${ENV_LOWER}/${APP}:${{ inputs.tags }}"
+          # SOURCE="${{ env.REGISTRY_URL }}/${{ env.IMAGE_NAMESPACE }}/${ENV_LOWER}/${APP}:${{ inputs.tags }}"
+          NAMESPACE_LOWER=$(echo "${{ env.IMAGE_NAMESPACE }}" | tr '[:upper:]' '[:lower:]')
+          SOURCE="${{ env.REGISTRY_URL }}/${NAMESPACE_LOWER}/${ENV_LOWER}/${APP}:${{ inputs.tags }}"
           LOCAL_TAG="${ENV_LOWER}-${APP}"
           docker pull "$SOURCE"
           docker tag "$SOURCE" "$LOCAL_TAG"
