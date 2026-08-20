@@ -1,0 +1,147 @@
+name: CI - Build and Push (Linux) [Demo]
+
+# Mirrors Jenkins job: Parameter-job/Jenkinsfile-CI-Linux
+# Jenkins "AGENT" node label -> GitHub-hosted runner (ubuntu-latest) for this demo.
+# For the real migration, swap `runs-on: ubuntu-latest` for a self-hosted runner
+# registered on build-nodejs-tax990 to get the exact same host/toolchain.
+
+on:
+  workflow_dispatch:
+    inputs:
+      trigger_repo:
+        description: "GitHub repo to build from (owner/repo). Leave blank to use this repo."
+        required: false
+        default: ""
+      trigger_branch:
+        description: "Branch to build"
+        required: true
+        default: "main"
+      app_env:
+        description: "Env (maps to Application choices below, same as Jenkins cascading dropdown)"
+        required: true
+        type: choice
+        options:
+          - Partner-API
+          - Partner-WEB
+          - WEB
+          - BMF
+          - BanditAI
+          - APIWEB
+          - PublicAPI
+      application:
+        description: "Application (must belong to the Env selected above - see README table)"
+        required: true
+        default: "tax990-app"
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - Sprint
+      tags:
+        description: "Docker tag number"
+        required: true
+
+env:
+  # Stand-in for Jenkins' NEXUS_URL. Point this at your real registry when migrating.
+  REGISTRY_URL: ${{ vars.REGISTRY_URL || 'ghcr.io' }}
+  IMAGE_NAMESPACE: ${{ github.repository }}
+
+jobs:
+  # Mirrors the Groovy CascadeChoiceParameter script that only let you pick an
+  # Application matching the chosen Env. workflow_dispatch has no cascading
+  # inputs, so we validate the pair explicitly and fail fast, same as Jenkins would.
+  resolve-application:
+    runs-on: ubuntu-latest
+    outputs:
+      valid: ${{ steps.check.outputs.valid }}
+    steps:
+      - name: Validate Env/Application pair
+        id: check
+        run: |
+          declare -A VALID_APPS=(
+            ["Partner-API"]="partnersapi-tax990-com"
+            ["Partner-WEB"]="tax990-partners-app tax990-partners-admin-console"
+            ["WEB"]="tax990-app"
+            ["BMF"]="bmfapi.tax990.com"
+            ["BanditAI"]="banditbot-client-tax990"
+            ["APIWEB"]="bulkuploadapi.tax990.com"
+            ["PublicAPI"]="tax990-console-app"
+          )
+          env_key="${{ inputs.app_env }}"
+          app="${{ inputs.application }}"
+          allowed="${VALID_APPS[$env_key]}"
+          if [[ " $allowed " != *" $app "* ]]; then
+            echo "::error::'$app' is not a valid Application for Env '$env_key'. Allowed: $allowed"
+            exit 1
+          fi
+          echo "valid=true" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: resolve-application
+    runs-on: ubuntu-latest
+    steps:
+      # Mirrors Jenkins stage: 'Git Clone' (git credentialsId + Trigger_Repo/Trigger_Branch)
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.trigger_repo != '' && inputs.trigger_repo || github.repository }}
+          ref: ${{ inputs.trigger_branch }}
+
+      # Mirrors Jenkins stage: '.env copy'
+      # Jenkins copied from a fixed host path. Here we resolve the same
+      # backend/<app> -> frontend/<app> -> apps/<app> fallback and drop in a
+      # placeholder .env (swap for a real secret source when migrating).
+      - name: Resolve app path and seed .env
+        id: paths
+        run: |
+          APP="${{ inputs.application }}"
+          if [ -d "backend/$APP" ]; then
+            APP_PATH="backend/$APP"
+          elif [ -d "frontend/$APP" ]; then
+            APP_PATH="frontend/$APP"
+          elif [ -d "apps/$APP" ]; then
+            APP_PATH="apps/$APP"
+          else
+            echo "::error::Could not find app directory for '$APP' (checked backend/, frontend/, apps/)"
+            exit 1
+          fi
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+          cp "$APP_PATH/.env.example" "$APP_PATH/.env" 2>/dev/null || echo "# no .env.example found" > "$APP_PATH/.env"
+
+      # Mirrors Jenkins stage: 'Docker Build'
+      - name: Docker build
+        run: |
+          docker build -t "${{ inputs.application }}:${{ inputs.tags }}" --no-cache "${{ steps.paths.outputs.app_path }}"
+
+      # Mirrors Jenkins stage: 'Nexus Login'
+      - name: Registry login
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_URL }}
+          username: ${{ env.REGISTRY_URL == 'ghcr.io' && github.actor || secrets.REGISTRY_USER }}
+          password: ${{ env.REGISTRY_URL == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.REGISTRY_PASS }}
+
+      # Mirrors Jenkins stage: 'Docker Push to Nexus'
+      - name: Tag and push
+        run: |
+          APP="${{ inputs.application }}"
+          ENV_LOWER=$(echo "${{ inputs.environment }}" | tr '[:upper:]' '[:lower:]')
+          TARGET="${{ env.REGISTRY_URL }}/${{ env.IMAGE_NAMESPACE }}/${ENV_LOWER}/${APP}:${{ inputs.tags }}"
+          docker tag "$APP:${{ inputs.tags }}" "$TARGET"
+          docker push "$TARGET"
+          echo "image=$TARGET" >> "$GITHUB_ENV"
+
+      # Mirrors Jenkins post { success/failure } Slack notifications
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.27.0
+        continue-on-error: true
+        with:
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && ':white_check_mark: CI succeeded' || ':x: CI failed' }} — ${{ inputs.application }}:${{ inputs.tags }} (${{ inputs.environment }}) triggered by ${{ github.actor }}, build #${{ github.run_number }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
