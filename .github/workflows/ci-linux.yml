@@ -112,8 +112,10 @@ jobs:
       # Mirrors Jenkins stage: 'Docker Build'
       - name: Docker build
         run: |
-          docker build -t "${{ inputs.application }}:${{ inputs.tags }}" --no-cache "${{ steps.paths.outputs.app_path }}"
-
+          # docker build -t "${{ inputs.application }}:${{ inputs.tags }}" --no-cache "${{ steps.paths.outputs.app_path }}"
+          APP=$(echo "${{ inputs.application }}" | tr '[:upper:]' '[:lower:]')
+          docker build -t "${APP}:${{ inputs.tags }}" --no-cache "${{ steps.paths.outputs.app_path }}"
+          
       # Mirrors Jenkins stage: 'Nexus Login'
       - name: Registry login
         uses: docker/login-action@v3
@@ -125,10 +127,14 @@ jobs:
       # Mirrors Jenkins stage: 'Docker Push to Nexus'
       - name: Tag and push
         run: |
-          APP="${{ inputs.application }}"
+          # APP="${{ inputs.application }}"
           ENV_LOWER=$(echo "${{ inputs.environment }}" | tr '[:upper:]' '[:lower:]')
-          TARGET="${{ env.REGISTRY_URL }}/${{ env.IMAGE_NAMESPACE }}/${ENV_LOWER}/${APP}:${{ inputs.tags }}"
-          docker tag "$APP:${{ inputs.tags }}" "$TARGET"
+          # TARGET="${{ env.REGISTRY_URL }}/${{ env.IMAGE_NAMESPACE }}/${ENV_LOWER}/${APP}:${{ inputs.tags }}"
+          # docker tag "$APP:${{ inputs.tags }}" "$TARGET"
+          APP=$(echo "${{ inputs.application }}" | tr '[:upper:]' '[:lower:]')
+          NAMESPACE_LOWER=$(echo "${{ env.IMAGE_NAMESPACE }}" | tr '[:upper:]' '[:lower:]')
+          TARGET="${{ env.REGISTRY_URL }}/${NAMESPACE_LOWER}/${ENV_LOWER}/${APP}:${{ inputs.tags }}"
+          docker tag "${APP}:${{ inputs.tags }}" "$TARGET"
           docker push "$TARGET"
           echo "image=$TARGET" >> "$GITHUB_ENV"
 
