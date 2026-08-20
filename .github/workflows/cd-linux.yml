@@ -1,0 +1,147 @@
+name: CD - Deploy (Linux) [Demo]
+
+# Mirrors Jenkins job: Parameter-job/Jenkinsfile-CD-Linux
+# Jenkins ran this on a fixed 'Tax990-APIWEB' agent (a persistent Docker host,
+# so the container survived between deploys and nginx sat in front of it).
+# A GitHub-hosted runner is a fresh VM every run, so this demo proves out the
+# *logic* end-to-end but the container/nginx state won't persist between runs.
+# For the real migration, point `runs-on` at a self-hosted runner registered
+# on that same host to get identical persistent behavior.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_env:
+        description: "Env"
+        required: true
+        type: choice
+        options:
+          - Partner-API
+          - Partner-WEB
+          - WEB
+          - BanditAI
+          - APIWEB
+          - PublicAPI
+      application:
+        description: "Application (must belong to Env above)"
+        required: true
+        default: "tax990-app"
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - Sprint
+      tags:
+        description: "Docker tag to deploy"
+        required: true
+
+env:
+  REGISTRY_URL: ${{ vars.REGISTRY_URL || 'ghcr.io' }}
+  IMAGE_NAMESPACE: ${{ github.repository }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Env/Application pair
+        run: |
+          declare -A VALID_APPS=(
+            ["Partner-API"]="partnersapi-tax990-com"
+            ["Partner-WEB"]="tax990-partners-app"
+            ["WEB"]="tax990-app"
+            ["BanditAI"]="banditbot-client-tax990"
+            ["APIWEB"]="bulkuploadapi.tax990.com"
+            ["PublicAPI"]="tax990-console-app"
+          )
+          env_key="${{ inputs.app_env }}"
+          app="${{ inputs.application }}"
+          allowed="${VALID_APPS[$env_key]}"
+          if [[ " $allowed " != *" $app "* ]]; then
+            echo "::error::'$app' is not a valid Application for Env '$env_key'."
+            exit 1
+          fi
+
+      # Mirrors Jenkins stage: 'Nexus Login'
+      - name: Registry login
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_URL }}
+          username: ${{ env.REGISTRY_URL == 'ghcr.io' && github.actor || secrets.REGISTRY_USER }}
+          password: ${{ env.REGISTRY_URL == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.REGISTRY_PASS }}
+
+      # Mirrors Jenkins stage: 'Docker Image Pull'
+      - name: Pull and retag image
+        run: |
+          APP="${{ inputs.application }}"
+          ENV_LOWER=$(echo "${{ inputs.environment }}" | tr '[:upper:]' '[:lower:]')
+          SOURCE="${{ env.REGISTRY_URL }}/${{ env.IMAGE_NAMESPACE }}/${ENV_LOWER}/${APP}:${{ inputs.tags }}"
+          LOCAL_TAG="${ENV_LOWER}-${APP}"
+          docker pull "$SOURCE"
+          docker tag "$SOURCE" "$LOCAL_TAG"
+          echo "LOCAL_TAG=$LOCAL_TAG" >> "$GITHUB_ENV"
+
+      # Mirrors Jenkins stage: 'Stop and Remove the Docker Container'
+      - name: Stop and remove existing container
+        continue-on-error: true
+        run: |
+          docker stop "$LOCAL_TAG" || true
+          docker rm "$LOCAL_TAG" || true
+          docker volume rm "$LOCAL_TAG" || true
+          docker volume prune -f
+
+      # Mirrors Jenkins stage: 'Run the Docker'
+      # Port/volume mapping table copied 1:1 from the Jenkins if/else chain.
+      - name: Run container
+        run: |
+          APP_LOWER=$(echo "${{ inputs.application }}" | tr '[:upper:]' '[:lower:]')
+          case "$APP_LOWER" in
+            partnersapi-tax990-com)
+              docker run -itd --name "$LOCAL_TAG" -p 4000:4000 -v "$LOCAL_TAG:/usr/src/app" "$LOCAL_TAG" ;;
+            tax990-partners-app)
+              docker run -itd --name "$LOCAL_TAG" -p 4001:3000 -v "$LOCAL_TAG:/usr/src/app" "$LOCAL_TAG" ;;
+            tax990-partners-admin-console)
+              docker run -itd --name "$LOCAL_TAG" -p 4004:3000 -v "$LOCAL_TAG:/usr/src/app" "$LOCAL_TAG" ;;
+            tax990-f990pf-api)
+              docker run -itd --name "$LOCAL_TAG" -p 8009:3000 -v "$LOCAL_TAG:/usr/src/app" "$LOCAL_TAG" ;;
+            tax990-f990pf-app)
+              docker run -itd --name "$LOCAL_TAG" -p 8002:3000 -v "$LOCAL_TAG:/usr/src/app" "$LOCAL_TAG" ;;
+            tax990-app)
+              docker run -itd --name "$LOCAL_TAG" -p 3000:3000 -v "$LOCAL_TAG:/usr/src/app" "$LOCAL_TAG" ;;
+            *)
+              echo "::error::Unknown application: $APP_LOWER"; exit 1 ;;
+          esac
+          docker update --restart always "$LOCAL_TAG"
+
+      # Mirrors Jenkins stage: 'Docker-List'
+      - name: List containers
+        run: docker ps -a
+
+      # Mirrors Jenkins stage: 'Nginx-Restart'
+      # Demo-only: shows the same command executing. On a self-hosted runner
+      # this would restart the real nginx sitting in front of your containers.
+      - name: Restart nginx (demo)
+        continue-on-error: true
+        run: |
+          sudo apt-get update -y -qq && sudo apt-get install -y -qq nginx
+          sudo service nginx restart
+          sudo service nginx status || true
+
+      - name: Smoke test the deployed container
+        run: |
+          sleep 3
+          curl -fsS "http://localhost:3000" || echo "Smoke test skipped/failed (expected for non-tax990-app apps in this demo)"
+
+      # Mirrors Jenkins post { success/failure } Slack notifications
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.27.0
+        continue-on-error: true
+        with:
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && ':rocket: CD succeeded' || ':x: CD failed' }} — ${{ inputs.application }}:${{ inputs.tags }} deployed to ${{ inputs.environment }} by ${{ github.actor }}, build #${{ github.run_number }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
