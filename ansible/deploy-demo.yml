@@ -1,0 +1,36 @@
+---
+# Demo stand-in for the real Tax990/APIWEB.yml, APIWEB-FT.yml, WIWO.yml playbooks
+# that live on the spanansible-t990-spt-stg control node and deploy to real
+# Windows IIS/service hosts over WinRM.
+#
+# This version targets localhost so the CD workflow can run on a GitHub-hosted
+# runner and prove out the variable plumbing (latest_version / app_name /
+# form_type / env_repo) without needing real Windows targets or WinRM creds.
+
+- hosts: localhost
+  gather_facts: no
+  vars:
+    latest_version: "{{ latest_version | default('unset') }}"
+    app_name: "{{ app_name | default('unset') }}"
+    form_type: "{{ form_type | default('') }}"
+    env_repo: "{{ env_repo | default('unset') }}"
+    application_type: "{{ application_type | default('unset') }}"
+
+  tasks:
+    - name: Show the deployment plan (what the real playbook would act on)
+      debug:
+        msg: >
+          Would deploy artifact '{{ latest_version }}' for app '{{ app_name }}'
+          (type: {{ application_type }}{{ form_type | length > 0 and ', form_type=' + form_type or '' }})
+          into environment '{{ env_repo }}'.
+
+    - name: Simulate the deployment (create a marker file, like the real playbook would drop the build on the target host)
+      copy:
+        dest: "./deploy-marker-{{ app_name }}.txt"
+        content: |
+          artifact: {{ latest_version }}
+          app_name: {{ app_name }}
+          application_type: {{ application_type }}
+          form_type: {{ form_type }}
+          env_repo: {{ env_repo }}
+          deployed_at: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
