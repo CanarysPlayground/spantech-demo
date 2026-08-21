@@ -1,0 +1,118 @@
+name: CD - Deploy via Ansible (Windows targets) [Demo]
+
+# Mirrors Jenkins job: Parameter-job/Jenkinsfile-CD-Windows
+# NOTE: despite the name, the real Jenkins job ran on 'spanansible-t990-spt-stg',
+# a LINUX ansible control node that pushes to the Windows/IIS targets over
+# WinRM — so this maps to ubuntu-latest, not windows-latest.
+# The real playbooks (Tax990/APIWEB.yml, APIWEB-FT.yml, WIWO.yml) live in a
+# private ops repo and target real hosts via WinRM. This demo runs a stand-in
+# playbook (ansible/deploy-demo.yml) against localhost so you can see the same
+# variable plumbing (latest_version/app_name/form_type/env_repo) execute
+# without needing real Windows targets or WinRM credentials.
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_date:
+        description: "Artifact/build identifier to deploy (Jenkins' ArtifactDate)"
+        required: true
+      module_type:
+        description: "Module type"
+        required: true
+        type: choice
+        options:
+          - Tax990
+      app_env:
+        description: "Env"
+        required: true
+        type: choice
+        options:
+          - Tax990-Api
+          - Tax990-Api-FT
+          - Tax990-WebSite
+          - Tax990-WebSite-FT
+          - Tax990-Windows
+          - Tax990-Worker
+          - TEBS-Windows
+      application:
+        description: "Application (must belong to Env above)"
+        required: true
+        default: "quickformapi.expresstaxexempt.com"
+      ft:
+        description: "Form type / WL name (only used for the *-FT Envs)"
+        required: false
+        default: ""
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for the demo playbook)
+        uses: actions/checkout@v4
+
+      - name: Validate Env/Application pair and resolve application type
+        id: resolve
+        run: |
+          declare -A VALID_APPS=(
+            ["Tax990-Api"]="api.expresstaxexempt.com"
+            ["Tax990-Api-FT"]="quickformapi.expresstaxexempt.com"
+            ["Tax990-WebSite"]="epostcard.expresstaxexempt.com"
+            ["Tax990-WebSite-FT"]="secure.expresstaxexempt.com"
+            ["Tax990-Windows"]="Express990.Efile.AppMovService"
+            ["Tax990-Worker"]="Tax990.SQLDataMigrationService"
+            ["TEBS-Windows"]="TEBS.Efile.AppValService"
+          )
+          env_key="${{ inputs.app_env }}"
+          app="${{ inputs.application }}"
+          allowed="${VALID_APPS[$env_key]}"
+          if [[ " $allowed " != *" $app "* ]]; then
+            echo "::error::'$app' is not a valid Application for Env '$env_key'. Allowed: $allowed"
+            exit 1
+          fi
+
+          # Mirrors the Groovy: isApiWeb / isApiWebFT / isWiwo -> applicationType
+          case "$env_key" in
+            "Tax990-Api"|"Tax990-WebSite")
+              app_type="APIWEB" ;;
+            "Tax990-Api-FT"|"Tax990-WebSite-FT")
+              app_type="APIWEB-FT" ;;
+            "Tax990-Windows"|"Tax990-Worker"|"TEBS-Windows")
+              app_type="WIWO" ;;
+            *)
+              app_type="UNKNOWN" ;;
+          esac
+          echo "application_type=$app_type" >> "$GITHUB_OUTPUT"
+
+      - name: Install Ansible
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq ansible
+
+      # Mirrors Jenkins stage: 'Deployment'
+      # Real command shape:
+      #   ansible-playbook -i Sprint ./Tax990/<type>/<type>.yml --extra-vars \
+      #     'latest_version=<ArtifactDate> app_name=<Application> [form_type=<FT>] env_repo=Sprint'
+      - name: Run deployment playbook
+        run: |
+          EXTRA_VARS="latest_version=${{ inputs.artifact_date }} app_name=${{ inputs.application }} application_type=${{ steps.resolve.outputs.application_type }} env_repo=Sprint"
+          if [ "${{ steps.resolve.outputs.application_type }}" == "APIWEB-FT" ]; then
+            EXTRA_VARS="$EXTRA_VARS form_type=${{ inputs.ft }}"
+          fi
+          ansible-playbook ansible/deploy-demo.yml --extra-vars "$EXTRA_VARS"
+
+      - name: Show deployment marker
+        run: cat "deploy-marker-${{ inputs.application }}.txt"
+
+      # Mirrors Jenkins post { success/failure } Slack notifications
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.27.0
+        continue-on-error: true
+        with:
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && ':rocket: Windows CD succeeded' || ':x: Windows CD failed' }} — ${{ inputs.application }} artifact ${{ inputs.artifact_date }} triggered by ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

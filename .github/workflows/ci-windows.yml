@@ -1,0 +1,195 @@
+name: CI - Build and Publish (Windows) [Demo]
+
+# Mirrors Jenkins job: Parameter-job/Jenkinsfile-CI-Windows
+# Jenkins ran this on 'Build-Tax990-1', a Windows box with Visual Studio Build
+# Tools + IIS installed. windows-latest GitHub-hosted runners ship with the
+# .NET SDK and MSBuild preinstalled, so the .NET Core build path works with
+# zero setup. The IIS-folder steps (backup/delete/move into
+# D:\Application\...) are simulated into a local folder here since a
+# GitHub-hosted runner has no IIS site to deploy into — see README for the
+# self-hosted-runner path that makes those steps real.
+
+on:
+  workflow_dispatch:
+    inputs:
+      trigger_repo:
+        description: "GitHub repo to build from (owner/repo). Leave blank to use this repo."
+        required: false
+        default: ""
+      trigger_branch:
+        description: "Branch to build"
+        required: true
+        default: "main"
+      solution_file:
+        description: "Path to the .csproj/.sln to build"
+        required: true
+        default: "apps/dotnet-demo-app/DemoApp.csproj"
+      program_type:
+        description: "Program type"
+        required: true
+        type: choice
+        options:
+          - .netCore8.0
+          - .netCore6.0
+          - .netFrameWork
+      mode_type:
+        description: "Build & publish configuration"
+        required: true
+        type: choice
+        options:
+          - Release
+          - Debug
+      nuget_restore:
+        description: "Restore NuGet packages first?"
+        required: true
+        type: choice
+        options:
+          - "Yes"
+          - "No"
+      app_env:
+        description: "Env (maps to Application below)"
+        required: true
+        type: choice
+        options:
+          - Tax990-Api
+          - Tax990-WebSite
+      application:
+        description: "Application (must belong to Env above)"
+        required: true
+        default: "quickformapi.expresstaxexempt.com"
+      build_number:
+        description: "Build number"
+        required: true
+      env_type:
+        description: "Environment"
+        required: true
+        type: choice
+        options:
+          - sprint
+
+jobs:
+  resolve-application:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate Env/Application pair
+        shell: bash
+        run: |
+          declare -A VALID_APPS=(
+            ["Tax990-Api"]="quickformapi.expresstaxexempt.com"
+            ["Tax990-WebSite"]="secure.expresstaxexempt.com"
+          )
+          env_key="${{ inputs.app_env }}"
+          app="${{ inputs.application }}"
+          allowed="${VALID_APPS[$env_key]}"
+          if [[ " $allowed " != *" $app "* ]]; then
+            echo "::error::'$app' is not a valid Application for Env '$env_key'. Allowed: $allowed"
+            exit 1
+          fi
+
+  build-and-publish:
+    needs: resolve-application
+    runs-on: windows-latest
+    env:
+      PUBLISH_DIR: publish-output
+      DEPLOY_ROOT: deploy-target
+    steps:
+      # Mirrors Jenkins stage: 'Git Checkout' (checked out into a 'devops' subdir there)
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.trigger_repo != '' && inputs.trigger_repo || github.repository }}
+          ref: ${{ inputs.trigger_branch }}
+
+      - name: Setup .NET
+        if: contains(inputs.program_type, 'netCore')
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ contains(inputs.program_type, '8.0') && '8.0.x' || '6.0.x' }}
+
+      # Mirrors Jenkins stage: 'Nuget restore'
+      - name: NuGet restore
+        if: inputs.nuget_restore == 'Yes' && contains(inputs.program_type, 'netCore')
+        run: dotnet restore "${{ inputs.solution_file }}"
+
+      - name: NuGet restore (.NET Framework note)
+        if: inputs.nuget_restore == 'Yes' && inputs.program_type == '.netFrameWork'
+        run: |
+          Write-Host "Real pipeline would run 'nuget restore' via C:\ProgramData\chocolatey\bin\nuget.exe here."
+          Write-Host "This demo focuses on the .NET Core path; see README for wiring up MSBuild/nuget.exe on a self-hosted runner."
+
+      # Mirrors Jenkins stage: 'Build Code'
+      - name: Build
+        if: contains(inputs.program_type, 'netCore')
+        run: dotnet build "${{ inputs.solution_file }}" -c ${{ inputs.mode_type }}
+
+      - name: Build (.NET Framework note)
+        if: inputs.program_type == '.netFrameWork'
+        run: Write-Host "Real pipeline would invoke MSBuild.exe here (present on windows-latest under 'Program Files (x86)\Microsoft Visual Studio\...\MSBuild\Current\Bin'). Demo app targets net8.0, so this branch is illustrative only."
+
+      # Mirrors Jenkins stage: 'Publish Code'
+      - name: Publish
+        if: contains(inputs.program_type, 'netCore')
+        run: dotnet publish "${{ inputs.solution_file }}" -c ${{ inputs.mode_type }} -o "${{ env.PUBLISH_DIR }}"
+
+      # Mirrors Jenkins stages: 'Backup Existing code' / 'Delete Existing code' / 'Move latest code to AppLocation'
+      # Real pipeline did this against D:\Application\<env>\<project>\<app>\ on IIS.
+      # No IIS site exists on a GitHub-hosted runner, so we simulate the same
+      # backup -> delete -> move sequence against a local folder.
+      - name: Backup existing deployment (simulated)
+        run: |
+          $target = "${{ env.DEPLOY_ROOT }}\${{ inputs.application }}"
+          if (Test-Path $target) {
+            $backup = "deploy-backup\${{ inputs.application }}-$(Get-Date -Format yyyyMMddHHmmss)"
+            New-Item -ItemType Directory -Force -Path $backup | Out-Null
+            Copy-Item -Recurse -Force "$target\*" $backup
+            Write-Host "Backed up existing deployment to $backup"
+          } else {
+            Write-Host "No existing deployment found at $target, nothing to back up (expected on a fresh runner)."
+          }
+
+      - name: Delete existing deployment (simulated)
+        run: |
+          $target = "${{ env.DEPLOY_ROOT }}\${{ inputs.application }}"
+          if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+
+      - name: Move published code to app location (simulated)
+        run: |
+          Copy-Item -Recurse -Force "${{ env.PUBLISH_DIR }}\*" "${{ env.DEPLOY_ROOT }}\${{ inputs.application }}"
+
+      # Mirrors Jenkins stage: 'Add robots.txt'
+      - name: Add robots.txt
+        run: |
+          "User-agent: *`nDisallow: /" | Out-File -FilePath "${{ env.DEPLOY_ROOT }}\${{ inputs.application }}\robots.txt" -Encoding ascii
+
+      # Mirrors Jenkins stages: 'Push Code to Nexus' / 'Delete nexus zip'
+      # Real pipeline zipped the deploy folder and pushed it to Nexus, then
+      # deleted the local zip. We zip the same folder and upload it as a
+      # workflow artifact as the demo stand-in for the Nexus push.
+      - name: Zip build output
+        run: Compress-Archive -Path "${{ env.DEPLOY_ROOT }}\${{ inputs.application }}\*" -DestinationPath "${{ inputs.application }}-${{ inputs.build_number }}.zip" -Force
+
+      - name: Upload artifact (stand-in for Nexus push)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.application }}-${{ inputs.build_number }}
+          path: ${{ inputs.application }}-${{ inputs.build_number }}.zip
+          retention-days: 14
+
+      - name: Delete local zip
+        if: always()
+        run: Remove-Item -Force "${{ inputs.application }}-${{ inputs.build_number }}.zip" -ErrorAction SilentlyContinue
+
+      # Mirrors Jenkins post { success/failure } Slack notifications
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.27.0
+        continue-on-error: true
+        with:
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && ':white_check_mark: Windows CI succeeded' || ':x: Windows CI failed' }} — ${{ inputs.application }} build #${{ inputs.build_number }} (${{ inputs.env_type }}) triggered by ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
